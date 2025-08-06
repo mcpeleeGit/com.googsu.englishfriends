@@ -91,6 +91,7 @@ import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.runtime.LaunchedEffect
+import android.content.SharedPreferences
 
 class MainActivity : ComponentActivity() {
     // 이미지 URI 저장용
@@ -111,10 +112,15 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        var selectedImageUri by mutableStateOf<Uri?>(null)
-        var ocrResult by mutableStateOf<List<OcrResultItem>>(emptyList())
+        var selectedImageUri by mutableStateOf<Uri?>(globalSelectedImageUri)
+        var ocrResult by mutableStateOf<List<OcrResultItem>>(globalOcrResult)
         var currentScreen by mutableStateOf<Screen>(Screen.Home)
         var quizData by mutableStateOf<QuizData?>(null)
+        var showRetryQuizDialog by mutableStateOf(false)
+        var showHistoryDialog by mutableStateOf(false)
+        
+        // 저장된 OCR 결과 로드
+        loadSavedOcrResult()
 
         // 런처 초기화
         requestCameraPermissionLauncher = registerForActivityResult(
@@ -153,12 +159,16 @@ class MainActivity : ComponentActivity() {
                 runOcrWithImageUri(cameraImageUri!!) { lines ->
                     val items = lines.map { line -> OcrResultItem(line, "") }
                     ocrResult = items
+                    // 전역 변수 업데이트
+                    updateGlobalVariables(selectedImageUri, ocrResult)
                     // 각 라인에 대해 번역 실행
                     items.forEachIndexed { index, item ->
                         translateText(item.originalText) { translation ->
                             ocrResult = ocrResult.toMutableList().apply {
                                 this[index] = this[index].copy(translation = translation)
                             }
+                            // 전역 변수 업데이트
+                            updateGlobalVariables(selectedImageUri, ocrResult)
                         }
                     }
                 }
@@ -172,12 +182,16 @@ class MainActivity : ComponentActivity() {
                 runOcrWithImageUri(it) { lines ->
                     val items = lines.map { line -> OcrResultItem(line, "") }
                     ocrResult = items
+                    // 전역 변수 업데이트
+                    updateGlobalVariables(selectedImageUri, ocrResult)
                     // 각 라인에 대해 번역 실행
                     items.forEachIndexed { index, item ->
                         translateText(item.originalText) { translation ->
                             ocrResult = ocrResult.toMutableList().apply {
                                 this[index] = this[index].copy(translation = translation)
                             }
+                            // 전역 변수 업데이트
+                            updateGlobalVariables(selectedImageUri, ocrResult)
                         }
                     }
                 }
@@ -218,18 +232,72 @@ class MainActivity : ComponentActivity() {
                                         }
                                     }
                                 },
-                                onHistoryClick = { /* TODO: 최근 학습 기록 연결 */ },
-                                onRetryClick = { /* TODO: 문제 다시 풀기 연결 */ },
+                                onHistoryClick = { 
+                                    val records = loadLearningRecords()
+                                    if (records.isNotEmpty()) {
+                                        showHistoryDialog = true
+                                    } else {
+                                        Toast.makeText(this, "학습 기록이 없습니다.", Toast.LENGTH_SHORT).show()
+                                    }
+                                },
+                                onRetryClick = { 
+                                    val records = loadLearningRecords()
+                                    if (records.isNotEmpty() && records[0].ocrResult.isNotEmpty()) {
+                                        val record = records[0]
+                                        val shuffledWords = record.ocrResult.shuffled()
+                                        quizData = QuizData(
+                                            words = shuffledWords,
+                                            direction = record.direction,
+                                            currentIndex = 0,
+                                            correctAnswers = 0,
+                                            totalQuestions = shuffledWords.size
+                                        )
+                                        selectedImageUri = record.imageUri?.let { Uri.parse(it) }
+                                        ocrResult = record.ocrResult
+                                        updateGlobalVariables(selectedImageUri, ocrResult)
+                                        currentScreen = Screen.Quiz
+                                    } else {
+                                        Toast.makeText(this, "저장된 문제가 없습니다.", Toast.LENGTH_SHORT).show()
+                                    }
+                                },
                                 onStartQuiz = { direction ->
-                                    val shuffledWords = ocrResult.shuffled()
-                                    quizData = QuizData(
-                                        words = shuffledWords,
-                                        direction = direction,
-                                        currentIndex = 0,
-                                        correctAnswers = 0,
-                                        totalQuestions = shuffledWords.size
-                                    )
-                                    currentScreen = Screen.Quiz
+                                    if (ocrResult.isNotEmpty()) {
+                                        val shuffledWords = ocrResult.shuffled()
+                                        quizData = QuizData(
+                                            words = shuffledWords,
+                                            direction = direction,
+                                            currentIndex = 0,
+                                            correctAnswers = 0,
+                                            totalQuestions = shuffledWords.size
+                                        )
+                                        currentScreen = Screen.Quiz
+                                    } else {
+                                        Toast.makeText(this, "문제가 없습니다.", Toast.LENGTH_SHORT).show()
+                                    }
+                                },
+                                showRetryQuizDialog = showRetryQuizDialog,
+                                onRetryQuizDialogDismiss = { showRetryQuizDialog = false },
+                                showHistoryDialog = showHistoryDialog,
+                                onHistoryDialogDismiss = { showHistoryDialog = false },
+                                onRetryFromHistory = { record ->
+                                    // 선택된 기록으로 퀴즈 시작
+                                    if (record.ocrResult.isNotEmpty()) {
+                                        val shuffledWords = record.ocrResult.shuffled()
+                                        quizData = QuizData(
+                                            words = shuffledWords,
+                                            direction = record.direction,
+                                            currentIndex = 0,
+                                            correctAnswers = 0,
+                                            totalQuestions = shuffledWords.size
+                                        )
+                                        selectedImageUri = record.imageUri?.let { Uri.parse(it) }
+                                        ocrResult = record.ocrResult
+                                        updateGlobalVariables(selectedImageUri, ocrResult)
+                                        currentScreen = Screen.Quiz
+                                        showHistoryDialog = false
+                                    } else {
+                                        Toast.makeText(this, "저장된 문제가 비어있습니다.", Toast.LENGTH_SHORT).show()
+                                    }
                                 }
                             )
                         }
@@ -279,6 +347,15 @@ class MainActivity : ComponentActivity() {
                                             correctAnswers = 0
                                         )
                                         currentScreen = Screen.Quiz
+                                    },
+                                    onSaveOcrResult = {
+                                        // OCR 결과를 로컬 스토리지에 저장
+                                        saveOcrResult(ocrResult, selectedImageUri)
+                                        // 학습 기록 저장
+                                        saveLearningRecord(quiz, selectedImageUri)
+                                        // 전역 변수 업데이트
+                                        updateGlobalVariables(selectedImageUri, ocrResult)
+                                        Toast.makeText(this, "문제가 저장되었습니다.", Toast.LENGTH_SHORT).show()
                                     }
                                 )
                             }
@@ -350,6 +427,17 @@ class MainActivity : ComponentActivity() {
     data class OcrResultItem(
         val originalText: String,
         val translation: String
+    )
+
+    data class LearningRecord(
+        val id: String,
+        val date: String,
+        val score: Int,
+        val correctAnswers: Int,
+        val totalQuestions: Int,
+        val direction: QuizDirection,
+        val ocrResult: List<OcrResultItem>,
+        val imageUri: String?
     )
 
     // 번역 함수
@@ -433,9 +521,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    companion object {
-        private const val SPEECH_REQUEST_CODE = 100
-    }
+
 
     // 음성 인식 결과 콜백
     private var onSpeechResult: ((String) -> Unit)? = null
@@ -443,6 +529,126 @@ class MainActivity : ComponentActivity() {
     // 음성 인식 결과 콜백 설정 함수
     fun setSpeechResultCallback(callback: (String) -> Unit) {
         onSpeechResult = callback
+    }
+
+    // SharedPreferences 키 상수
+    companion object {
+        private const val SPEECH_REQUEST_CODE = 100
+        private const val PREFS_NAME = "EnglishFriendsPrefs"
+        private const val KEY_SAVED_OCR_RESULT = "saved_ocr_result"
+        private const val KEY_SAVED_IMAGE_URI = "saved_image_uri"
+        private const val KEY_LEARNING_RECORDS = "learning_records"
+    }
+
+    // OCR 결과를 로컬 스토리지에 저장
+    private fun saveOcrResult(ocrResult: List<OcrResultItem>, imageUri: Uri?) {
+        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        val editor = prefs.edit()
+        
+        // OCR 결과를 JSON 형태로 저장
+        val gson = com.google.gson.Gson()
+        val jsonResult = gson.toJson(ocrResult)
+        editor.putString(KEY_SAVED_OCR_RESULT, jsonResult)
+        
+        // 이미지 URI 저장
+        imageUri?.let { uri ->
+            editor.putString(KEY_SAVED_IMAGE_URI, uri.toString())
+        }
+        
+        editor.apply()
+        
+        // 전역 변수 업데이트
+        globalSelectedImageUri = imageUri
+        globalOcrResult = ocrResult
+    }
+
+    // 저장된 OCR 결과 로드
+    private fun loadSavedOcrResult() {
+        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        val jsonResult = prefs.getString(KEY_SAVED_OCR_RESULT, null)
+        val savedImageUri = prefs.getString(KEY_SAVED_IMAGE_URI, null)
+        
+        if (jsonResult != null) {
+            try {
+                val gson = com.google.gson.Gson()
+                val type = com.google.gson.reflect.TypeToken.getParameterized(List::class.java, OcrResultItem::class.java).type
+                val savedOcrResult: List<OcrResultItem> = gson.fromJson(jsonResult, type)
+                
+                // 전역 변수 업데이트
+                globalSelectedImageUri = savedImageUri?.let { Uri.parse(it) }
+                globalOcrResult = savedOcrResult
+            } catch (e: Exception) {
+                // JSON 파싱 실패 시 저장된 데이터 삭제
+                prefs.edit().clear().apply()
+            }
+        }
+    }
+
+    // 저장된 OCR 결과가 있는지 확인
+    fun hasSavedOcrResult(): Boolean {
+        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        return prefs.getString(KEY_SAVED_OCR_RESULT, null) != null
+    }
+
+    // 전역 변수들
+    private var globalSelectedImageUri: Uri? = null
+    private var globalOcrResult: List<OcrResultItem> = emptyList()
+
+    // 전역 변수 업데이트 함수
+    fun updateGlobalVariables(selectedImageUri: Uri?, ocrResult: List<OcrResultItem>) {
+        globalSelectedImageUri = selectedImageUri
+        globalOcrResult = ocrResult
+    }
+
+    // 학습 기록 저장
+    private fun saveLearningRecord(quizData: QuizData, imageUri: Uri?) {
+        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        val editor = prefs.edit()
+        
+        // 기존 학습 기록 로드
+        val existingRecords = loadLearningRecords().toMutableList()
+        
+        // 새로운 학습 기록 생성
+        val newRecord = LearningRecord(
+            id = System.currentTimeMillis().toString(),
+            date = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date()),
+            score = ((quizData.correctAnswers.toFloat() / quizData.totalQuestions.toFloat()) * 100).toInt(),
+            correctAnswers = quizData.correctAnswers,
+            totalQuestions = quizData.totalQuestions,
+            direction = quizData.direction,
+            ocrResult = quizData.words,
+            imageUri = imageUri?.toString()
+        )
+        
+        // 최신 기록을 맨 앞에 추가 (최대 10개까지만 저장)
+        existingRecords.add(0, newRecord)
+        if (existingRecords.size > 10) {
+            existingRecords.removeAt(existingRecords.size - 1)
+        }
+        
+        // JSON으로 저장
+        val gson = com.google.gson.Gson()
+        val jsonRecords = gson.toJson(existingRecords)
+        editor.putString(KEY_LEARNING_RECORDS, jsonRecords)
+        editor.apply()
+    }
+
+    // 학습 기록 로드
+    fun loadLearningRecords(): List<LearningRecord> {
+        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        val jsonRecords = prefs.getString(KEY_LEARNING_RECORDS, null)
+        
+        if (jsonRecords != null) {
+            try {
+                val gson = com.google.gson.Gson()
+                val type = com.google.gson.reflect.TypeToken.getParameterized(List::class.java, LearningRecord::class.java).type
+                return gson.fromJson(jsonRecords, type) ?: emptyList()
+            } catch (e: Exception) {
+                // JSON 파싱 실패 시 저장된 데이터 삭제
+                prefs.edit().remove(KEY_LEARNING_RECORDS).apply()
+            }
+        }
+        return emptyList()
     }
 
     enum class Screen {
@@ -471,7 +677,12 @@ fun HomeScreen(
     onGalleryClick: () -> Unit,
     onHistoryClick: () -> Unit,
     onRetryClick: () -> Unit,
-    onStartQuiz: (MainActivity.QuizDirection) -> Unit
+    onStartQuiz: (MainActivity.QuizDirection) -> Unit,
+    showRetryQuizDialog: Boolean = false,
+    onRetryQuizDialogDismiss: () -> Unit = {},
+    showHistoryDialog: Boolean = false,
+    onHistoryDialogDismiss: () -> Unit = {},
+    onRetryFromHistory: (MainActivity.LearningRecord) -> Unit = {}
 ) {
     val context = LocalContext.current
     var isOcrExpanded by remember { mutableStateOf(false) }
@@ -688,10 +899,126 @@ fun HomeScreen(
                         Text("🇰🇷 한글 → 🇺🇸 영어")
                     }
                 }
+            }
+        )
+    }
+    
+    // 문제 다시 풀기 다이얼로그
+    if (showRetryQuizDialog) {
+        AlertDialog(
+            onDismissRequest = onRetryQuizDialogDismiss,
+            title = {
+                Text("저장된 문제 다시 풀기", fontWeight = FontWeight.Bold)
             },
-            dismissButton = {
-                TextButton(onClick = { showQuizDialog = false }) {
-                    Text("취소")
+            text = {
+                Text("저장된 문제로 어떤 방향으로 퀴즈를 풀겠습니까?")
+            },
+            confirmButton = {
+                Column {
+                    Button(
+                        onClick = {
+                            onRetryQuizDialogDismiss()
+                            onStartQuiz(MainActivity.QuizDirection.ENGLISH_TO_KOREAN)
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = androidx.compose.material3.MaterialTheme.colorScheme.primary
+                        )
+                    ) {
+                        Text("🇺🇸 영어 → 🇰🇷 한글")
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Button(
+                        onClick = {
+                            onRetryQuizDialogDismiss()
+                            onStartQuiz(MainActivity.QuizDirection.KOREAN_TO_ENGLISH)
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = androidx.compose.material3.MaterialTheme.colorScheme.tertiary
+                        )
+                    ) {
+                        Text("🇰🇷 한글 → 🇺🇸 영어")
+                    }
+                }
+            }
+        )
+    }
+    
+    // 학습 기록 다이얼로그
+    if (showHistoryDialog) {
+        val records = (context as? MainActivity)?.loadLearningRecords() ?: emptyList()
+        
+        AlertDialog(
+            onDismissRequest = onHistoryDialogDismiss,
+            title = {
+                Text("최근 학습 기록", fontWeight = FontWeight.Bold)
+            },
+            text = {
+                LazyColumn(
+                    modifier = Modifier.heightIn(max = 400.dp)
+                ) {
+                    itemsIndexed(records) { index, record ->
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp),
+                            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(12.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        record.date,
+                                        style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Text(
+                                        "${record.score}점",
+                                        style = androidx.compose.material3.MaterialTheme.typography.bodyLarge,
+                                        fontWeight = FontWeight.Bold,
+                                        color = when {
+                                            record.score >= 90 -> Color(0xFF2E7D32)
+                                            record.score >= 70 -> Color(0xFFF57C00)
+                                            else -> Color(0xFFC62828)
+                                        }
+                                    )
+                                }
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    "맞힌 문제: ${record.correctAnswers}/${record.totalQuestions}",
+                                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                                    color = Color.Gray
+                                )
+                                Text(
+                                    if (record.direction == MainActivity.QuizDirection.ENGLISH_TO_KOREAN) 
+                                        "🇺🇸 영어 → 🇰🇷 한글" else "🇰🇷 한글 → 🇺🇸 영어",
+                                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                                    color = Color.Gray
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Button(
+                                    onClick = { onRetryFromHistory(record) },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = androidx.compose.material3.MaterialTheme.colorScheme.secondary
+                                    )
+                                ) {
+                                    Text("다시 풀기")
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = onHistoryDialogDismiss) {
+                    Text("닫기")
                 }
             }
         )
@@ -714,6 +1041,15 @@ fun QuizScreen(
     
     val context = LocalContext.current
     val mainActivity = context as? MainActivity
+    
+    // 안전한 접근을 위한 검사
+    if (quizData.words.isEmpty() || quizData.currentIndex >= quizData.words.size) {
+        // 문제가 없으면 홈으로 돌아가기
+        LaunchedEffect(Unit) {
+            onBackToHome()
+        }
+        return
+    }
     
     val currentWord = quizData.words[quizData.currentIndex]
     val question = if (quizData.direction == MainActivity.QuizDirection.ENGLISH_TO_KOREAN) {
@@ -909,7 +1245,8 @@ fun ResultScreen(
     modifier: Modifier = Modifier,
     quizData: MainActivity.QuizData,
     onBackToHome: () -> Unit,
-    onRetryQuiz: () -> Unit
+    onRetryQuiz: () -> Unit,
+    onSaveOcrResult: () -> Unit = {}
 ) {
     val score = (quizData.correctAnswers.toFloat() / quizData.totalQuestions.toFloat()) * 100
     
@@ -980,12 +1317,22 @@ fun ResultScreen(
             
             Button(
                 onClick = onRetryQuiz,
-                modifier = Modifier.weight(1f).padding(start = 8.dp),
+                modifier = Modifier.weight(1f).padding(horizontal = 4.dp),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = androidx.compose.material3.MaterialTheme.colorScheme.secondary
                 )
             ) {
                 Text("다시 풀기")
+            }
+            
+            Button(
+                onClick = onSaveOcrResult,
+                modifier = Modifier.weight(1f).padding(start = 8.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = androidx.compose.material3.MaterialTheme.colorScheme.tertiary
+                )
+            ) {
+                Text("문제 저장")
             }
         }
         
